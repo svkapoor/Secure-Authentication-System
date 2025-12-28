@@ -2,8 +2,9 @@
 
 This project intentionally starts with an insecure baseline so you can observe weaknesses before hardening.
 
-## Phase 1: Baseline (insecure)
-- Plaintext password storage (do not use in production).
+## Phase 1: Baseline (hashing + JWT)
+- Argon2id password hashing.
+- JWT stored in an HttpOnly cookie for authentication.
 - Simple register/login/logout flow.
 
 ## Run
