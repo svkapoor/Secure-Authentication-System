@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -21,6 +22,12 @@ ph = PasswordHasher()
 JWT_SECRET = os.environ.get("JWT_SECRET", app.secret_key)
 JWT_ALG = "HS256"
 JWT_EXP_MINUTES = 30
+
+RATE_WINDOW_SEC = 60
+RATE_MAX_FAILS = 5
+LOCKOUT_SEC = 300
+_failed_logins: dict[str, list[float]] = {}
+_lockouts: dict[str, float] = {}
 
 # Creates database if doesn't exist
 def init_db() -> None:
@@ -133,6 +140,14 @@ def login():
     if request.method == "POST":
         username = request.form.get("username", "").strip()
         password = request.form.get("password", "")
+        client_ip = request.headers.get("X-Forwarded-For", request.remote_addr) or "unknown"
+        rate_key = f"{username.lower()}|{client_ip}"
+        now = time.monotonic()
+
+        locked_until = _lockouts.get(rate_key)
+        if locked_until and now < locked_until:
+            error = "Too many failed attempts. Try again later."
+            return render_template_string(LOGIN_TEMPLATE, error=error), 429
 
         # Checks if username exists
         with sqlite3.connect(DB_PATH) as conn:
@@ -155,9 +170,20 @@ def login():
 
             # Hashes don't match
             if not ok:
+                attempts = _failed_logins.get(rate_key, [])
+                attempts = [ts for ts in attempts if now - ts <= RATE_WINDOW_SEC]
+                attempts.append(now)
+                _failed_logins[rate_key] = attempts
+                if len(attempts) >= RATE_MAX_FAILS:
+                    _lockouts[rate_key] = now + LOCKOUT_SEC
+                    error = "Too many failed attempts. Try again later."
+                    return render_template_string(LOGIN_TEMPLATE, error=error), 429
                 error = "Invalid credentials"
             # Hashes match
             else:
+                _failed_logins.pop(rate_key, None)
+                _lockouts.pop(rate_key, None)
+                # Create JWT
                 token = create_token(row[0], username)
                 response = redirect(url_for("protected"))
                 response.set_cookie(
@@ -173,6 +199,7 @@ def login():
 
 @app.route("/protected")
 def protected():
+    # Verify token
     user_id, username = get_current_user()
     if not user_id:
         return redirect(url_for("login"))
