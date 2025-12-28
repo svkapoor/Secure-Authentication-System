@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import os
+import secrets
 import sqlite3
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import jwt
-from flask import Flask, redirect, render_template_string, request, url_for
+from flask import Flask, make_response, redirect, render_template_string, request, url_for
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
 from jwt import InvalidTokenError
@@ -22,12 +23,19 @@ ph = PasswordHasher()
 JWT_SECRET = os.environ.get("JWT_SECRET", app.secret_key)
 JWT_ALG = "HS256"
 JWT_EXP_MINUTES = 30
+REFRESH_EXP_DAYS = 7
+COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "0") == "1"
 
+# Rate limiting
 RATE_WINDOW_SEC = 60
 RATE_MAX_FAILS = 5
 LOCKOUT_SEC = 300
 _failed_logins: dict[str, list[float]] = {}
 _lockouts: dict[str, float] = {}
+
+CSRF_COOKIE_NAME = "csrf_token"
+ACCESS_COOKIE_NAME = "access_token"
+REFRESH_COOKIE_NAME = "refresh_token"
 
 # Creates database if doesn't exist
 def init_db() -> None:
@@ -51,6 +59,7 @@ REGISTER_TEMPLATE = """
 <title>Register</title>
 <h1>Register</h1>
 <form method="post">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
   <label>Username <input name="username" required></label><br>
   <label>Password <input name="password" type="password" required></label><br>
   <button type="submit">Create account</button>
@@ -63,6 +72,7 @@ LOGIN_TEMPLATE = """
 <title>Login</title>
 <h1>Login</h1>
 <form method="post">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
   <label>Username <input name="username" required></label><br>
   <label>Password <input name="password" type="password" required></label><br>
   <button type="submit">Sign in</button>
@@ -89,8 +99,49 @@ def create_token(user_id: int, username: str) -> str:
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
 
 
+def create_refresh_token(user_id: int, username: str) -> str:
+    payload = {
+        "sub": username,
+        "uid": user_id,
+        "typ": "refresh",
+        "exp": datetime.utcnow() + timedelta(days=REFRESH_EXP_DAYS),
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
+
+
+def _get_or_set_csrf_cookie(response=None) -> str:
+    token = request.cookies.get(CSRF_COOKIE_NAME)
+    if token:
+        return token
+
+    token = secrets.token_urlsafe(32)
+    if response is not None:
+        response.set_cookie(
+            CSRF_COOKIE_NAME,
+            token,
+            httponly=False,
+            samesite="Lax",
+            secure=COOKIE_SECURE,
+        )
+    return token
+
+
+def _verify_csrf() -> bool:
+    cookie_token = request.cookies.get(CSRF_COOKIE_NAME)
+    form_token = request.form.get("csrf_token", "")
+    return bool(cookie_token) and cookie_token == form_token
+
+
+def _render_with_csrf(template: str, **context):
+    response = make_response(
+        render_template_string(template, csrf_token=_get_or_set_csrf_cookie(), **context)
+    )
+    _get_or_set_csrf_cookie(response)
+    return response
+
+
 def get_current_user() -> tuple[int | None, str | None]:
-    token = request.cookies.get("access_token")
+    token = request.cookies.get(ACCESS_COOKIE_NAME)
     if not token:
         return None, None
 
@@ -113,10 +164,13 @@ def index():
 @app.route("/register", methods=["GET", "POST"])
 def register():
     if request.method == "POST":
+        if not _verify_csrf():
+            return "CSRF token missing or invalid", 400
+
         username = request.form.get("username", "").strip()
         password = request.form.get("password", "")
         if not username or not password:
-            return render_template_string(REGISTER_TEMPLATE), 400
+            return _render_with_csrf(REGISTER_TEMPLATE), 400
         
         # Hashes password using Argon2
         password_hash = ph.hash(password)
@@ -127,17 +181,20 @@ def register():
                     (username, password_hash),
                 )
             except sqlite3.IntegrityError:
-                return render_template_string(REGISTER_TEMPLATE), 400
+                return _render_with_csrf(REGISTER_TEMPLATE), 400
 
         return redirect(url_for("login"))
 
-    return render_template_string(REGISTER_TEMPLATE)
+    return _render_with_csrf(REGISTER_TEMPLATE)
 
 # Login Page
 @app.route("/login", methods=["GET", "POST"])
 def login():
     error = None
     if request.method == "POST":
+        if not _verify_csrf():
+            return "CSRF token missing or invalid", 400
+
         username = request.form.get("username", "").strip()
         password = request.form.get("password", "")
         client_ip = request.headers.get("X-Forwarded-For", request.remote_addr) or "unknown"
@@ -147,7 +204,7 @@ def login():
         locked_until = _lockouts.get(rate_key)
         if locked_until and now < locked_until:
             error = "Too many failed attempts. Try again later."
-            return render_template_string(LOGIN_TEMPLATE, error=error), 429
+            return _render_with_csrf(LOGIN_TEMPLATE, error=error), 429
 
         # Checks if username exists
         with sqlite3.connect(DB_PATH) as conn:
@@ -177,7 +234,7 @@ def login():
                 if len(attempts) >= RATE_MAX_FAILS:
                     _lockouts[rate_key] = now + LOCKOUT_SEC
                     error = "Too many failed attempts. Try again later."
-                    return render_template_string(LOGIN_TEMPLATE, error=error), 429
+                    return _render_with_csrf(LOGIN_TEMPLATE, error=error), 429
                 error = "Invalid credentials"
             # Hashes match
             else:
@@ -185,16 +242,25 @@ def login():
                 _lockouts.pop(rate_key, None)
                 # Create JWT
                 token = create_token(row[0], username)
+                refresh_token = create_refresh_token(row[0], username)
                 response = redirect(url_for("protected"))
                 response.set_cookie(
-                    "access_token",
+                    ACCESS_COOKIE_NAME,
                     token,
                     httponly=True,
                     samesite="Lax",
+                    secure=COOKIE_SECURE,
+                )
+                response.set_cookie(
+                    REFRESH_COOKIE_NAME,
+                    refresh_token,
+                    httponly=True,
+                    samesite="Lax",
+                    secure=COOKIE_SECURE,
                 )
                 return response
 
-    return render_template_string(LOGIN_TEMPLATE, error=error)
+    return _render_with_csrf(LOGIN_TEMPLATE, error=error)
 
 
 @app.route("/protected")
@@ -209,7 +275,42 @@ def protected():
 @app.route("/logout")
 def logout():
     response = redirect(url_for("login"))
-    response.delete_cookie("access_token")
+    response.delete_cookie(ACCESS_COOKIE_NAME)
+    response.delete_cookie(REFRESH_COOKIE_NAME)
+    return response
+
+
+@app.route("/refresh", methods=["POST"])
+def refresh():
+    if not _verify_csrf():
+        return "CSRF token missing or invalid", 400
+
+    token = request.cookies.get(REFRESH_COOKIE_NAME)
+    if not token:
+        return "Missing refresh token", 401
+
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
+    except InvalidTokenError:
+        return "Invalid refresh token", 401
+
+    if payload.get("typ") != "refresh":
+        return "Invalid refresh token", 401
+
+    user_id = payload.get("uid")
+    username = payload.get("sub")
+    if not user_id or not username:
+        return "Invalid refresh token", 401
+
+    new_access = create_token(user_id, username)
+    response = redirect(url_for("protected"))
+    response.set_cookie(
+        ACCESS_COOKIE_NAME,
+        new_access,
+        httponly=True,
+        samesite="Lax",
+        secure=COOKIE_SECURE,
+    )
     return response
 
 
