@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% block title %}Vault · Password Manager{% endblock %}
+{% block content %}
+<section class="card vault-card">
+  <div class="card-body">
+    <p class="eyebrow">Encrypted vault</p>
+    <h1>Welcome back, {{ username }}!</h1>
+    <p class="muted">Store credentials securely with AES-256-GCM encryption. Only you can decrypt them after signing in.</p>
+    {% if error %}<p class="error">{{ error }}</p>{% endif %}
+
+    <div class="vault-unlock">
+      <h2>Unlock your vault</h2>
+      <p class="muted">Enter your vault passphrase. It never leaves this session.</p>
+      <form class="stack" method="post">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+        <input type="hidden" name="action" value="unlock" />
+        <label>
+          <span>Vault passphrase</span>
+          <input name="vault_passphrase" type="password" placeholder="Vault passphrase" required />
+        </label>
+        <button type="submit">Unlock vault</button>
+      </form>
+    </div>
+
+    {% if vault_entries is not none %}
+    <div class="vault-form">
+      <h2>Add a new credential</h2>
+      <form class="stack" method="post">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+        <input type="hidden" name="action" value="add" />
+        <label>
+          <span>Label</span>
+          <input name="label" placeholder="Example: Personal Email" required />
+        </label>
+        <label>
+          <span>Username / Email</span>
+          <input name="vault_username" placeholder="me@example.com" required />
+        </label>
+        <label>
+          <span>Password</span>
+          <input name="vault_password" type="password" placeholder="••••••••" required />
+        </label>
+        <label>
+          <span>Vault passphrase</span>
+          <input name="vault_passphrase" type="password" placeholder="Vault passphrase" required />
+        </label>
+        <button type="submit">Store password</button>
+      </form>
+    </div>
+
+    <div class="vault-table-wrapper">
+      <div class="actions">
+        <form method="post" action="{{ url_for('refresh') }}">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+          <button type="submit">Refresh access token</button>
+        </form>
+        <a class="ghost" href="{{ url_for('logout') }}">Logout</a>
+      </div>
+      {% if vault_entries %}
+      <table class="vault-table">
+        <thead>
+          <tr>
+            <th>Label</th>
+            <th>Username</th>
+            <th>Password</th>
+            <th>Stored</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for entry in vault_entries %}
+          <tr>
+            <td>{{ entry.label }}</td>
+            <td>{{ entry.login_name }}</td>
+            <td><code>{{ entry.password }}</code></td>
+            <td>{{ entry.created_at }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <p class="muted">No passwords saved yet. Use the form above to add your first credential.</p>
+      {% endif %}
+    </div>
+    {% else %}
+    <p class="muted">Your vault is locked. Unlock it with your passphrase to view or add entries.</p>
+    {% endif %}
+  </div>
+</section>
+{% endblock %}

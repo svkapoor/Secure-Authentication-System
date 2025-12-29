@@ -165,6 +165,57 @@ button:hover {
   gap: 1rem;
 }
 
+.vault-card {
+  width: 100%;
+}
+
+.vault-form,
+.vault-unlock {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 16px;
+  padding: 1.5rem;
+  background: rgba(0, 0, 0, 0.2);
+  margin-bottom: 2rem;
+}
+
+.vault-form h2,
+.vault-unlock h2 {
+  margin: 0 0 1rem 0;
+}
+
+.vault-table-wrapper {
+  width: 100%;
+  overflow-x: auto;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(0, 0, 0, 0.15);
+  padding: 1rem;
+}
+
+.vault-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.95rem;
+}
+
+.vault-table th,
+.vault-table td {
+  text-align: left;
+  padding: 0.75rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.vault-table th {
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.vault-table code {
+  background: rgba(255, 255, 255, 0.1);
+  padding: 0.2rem 0.4rem;
+  border-radius: 6px;
+}
+
 @media (max-width: 600px) {
   .page {
     padding: 1.5rem;
