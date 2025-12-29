@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import jwt
-from flask import Flask, make_response, redirect, render_template_string, request, url_for
+from flask import Flask, make_response, redirect, render_template, request, url_for
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
 from jwt import InvalidTokenError
@@ -16,7 +16,11 @@ from jwt import InvalidTokenError
 APP_DIR = Path(__file__).resolve().parent
 DB_PATH = APP_DIR / "app.db"
 
-app = Flask(__name__)
+app = Flask(
+    __name__,
+    template_folder=str(APP_DIR / "templates"),
+    static_folder=str(APP_DIR / "static"),
+)
 app.secret_key = os.environ.get("FLASK_SECRET", "dev-secret")
 ph = PasswordHasher()
 
@@ -53,41 +57,6 @@ def init_db() -> None:
 def _ensure_db() -> None:
     init_db()
 
-
-REGISTER_TEMPLATE = """
-<!doctype html>
-<title>Register</title>
-<h1>Register</h1>
-<form method="post">
-  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-  <label>Username <input name="username" required></label><br>
-  <label>Password <input name="password" type="password" required></label><br>
-  <button type="submit">Create account</button>
-</form>
-<p><a href="{{ url_for('login') }}">Login</a></p>
-"""
-
-LOGIN_TEMPLATE = """
-<!doctype html>
-<title>Login</title>
-<h1>Login</h1>
-<form method="post">
-  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-  <label>Username <input name="username" required></label><br>
-  <label>Password <input name="password" type="password" required></label><br>
-  <button type="submit">Sign in</button>
-</form>
-<p><a href="{{ url_for('register') }}">Register</a></p>
-{% if error %}<p style="color: #a00">{{ error }}</p>{% endif %}
-"""
-
-PROTECTED_TEMPLATE = """
-<!doctype html>
-<title>Protected</title>
-<h1>Welcome, {{ username }}!</h1>
-<p>This is a protected page.</p>
-<p><a href="{{ url_for('logout') }}">Logout</a></p>
-"""
 
 # Creates JWT for authenticated users
 def create_token(user_id: int, username: str) -> str:
@@ -132,9 +101,9 @@ def _verify_csrf() -> bool:
     return bool(cookie_token) and cookie_token == form_token
 
 
-def _render_with_csrf(template: str, **context):
+def _render_with_csrf(template_name: str, **context):
     response = make_response(
-        render_template_string(template, csrf_token=_get_or_set_csrf_cookie(), **context)
+        render_template(template_name, csrf_token=_get_or_set_csrf_cookie(), **context)
     )
     _get_or_set_csrf_cookie(response)
     return response
@@ -163,6 +132,7 @@ def index():
 # Register Page
 @app.route("/register", methods=["GET", "POST"])
 def register():
+    error = None
     if request.method == "POST":
         if not _verify_csrf():
             return "CSRF token missing or invalid", 400
@@ -170,7 +140,8 @@ def register():
         username = request.form.get("username", "").strip()
         password = request.form.get("password", "")
         if not username or not password:
-            return _render_with_csrf(REGISTER_TEMPLATE), 400
+            error = "Username and password are required."
+            return _render_with_csrf("register.html", error=error), 400
         
         # Hashes password using Argon2
         password_hash = ph.hash(password)
@@ -181,11 +152,12 @@ def register():
                     (username, password_hash),
                 )
             except sqlite3.IntegrityError:
-                return _render_with_csrf(REGISTER_TEMPLATE), 400
+                error = "That username is already taken."
+                return _render_with_csrf("register.html", error=error), 400
 
         return redirect(url_for("login"))
 
-    return _render_with_csrf(REGISTER_TEMPLATE)
+    return _render_with_csrf("register.html", error=error)
 
 # Login Page
 @app.route("/login", methods=["GET", "POST"])
@@ -204,7 +176,7 @@ def login():
         locked_until = _lockouts.get(rate_key)
         if locked_until and now < locked_until:
             error = "Too many failed attempts. Try again later."
-            return _render_with_csrf(LOGIN_TEMPLATE, error=error), 429
+            return _render_with_csrf("login.html", error=error), 429
 
         # Checks if username exists
         with sqlite3.connect(DB_PATH) as conn:
@@ -234,7 +206,7 @@ def login():
                 if len(attempts) >= RATE_MAX_FAILS:
                     _lockouts[rate_key] = now + LOCKOUT_SEC
                     error = "Too many failed attempts. Try again later."
-                    return _render_with_csrf(LOGIN_TEMPLATE, error=error), 429
+                    return _render_with_csrf("login.html", error=error), 429
                 error = "Invalid credentials"
             # Hashes match
             else:
@@ -260,7 +232,7 @@ def login():
                 )
                 return response
 
-    return _render_with_csrf(LOGIN_TEMPLATE, error=error)
+    return _render_with_csrf("login.html", error=error)
 
 
 @app.route("/protected")
@@ -269,7 +241,7 @@ def protected():
     user_id, username = get_current_user()
     if not user_id:
         return redirect(url_for("login"))
-    return render_template_string(PROTECTED_TEMPLATE, username=username)
+    return _render_with_csrf("protected.html", username=username)
 
 
 @app.route("/logout")

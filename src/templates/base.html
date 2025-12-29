@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{% block title %}Password Manager{% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/main.css') }}" />
+  </head>
+  <body>
+    <div class="page">
+      <header class="site-header">
+        <div class="brand"><a href="{{ url_for('index') }}">Password Manager</a></div>
+        <nav class="site-nav">
+          <a href="{{ url_for('login') }}">Login</a>
+          <a href="{{ url_for('register') }}">Register</a>
+          <a href="{{ url_for('protected') }}">Vault</a>
+        </nav>
+      </header>
+      <main>
+        {% block content %}{% endblock %}
+      </main>
+      <footer class="site-footer">
+        <p>Built with Flask, Argon2 and JWT to protect your password vault.</p>
+      </footer>
+    </div>
+  </body>
+</html>

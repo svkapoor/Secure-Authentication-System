@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}Create Account · Password Manager{% endblock %}
+{% block content %}
+<section class="card">
+  <div class="card-body">
+    <p class="eyebrow">Step 1 · Create your vault access</p>
+    <h1>Create a new Password Manager account</h1>
+    <p class="muted">Usernames must be unique and every password is hashed with Argon2 before storage.</p>
+    {% if error %}<p class="error">{{ error }}</p>{% endif %}
+    <form class="stack" method="post">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <label>
+        <span>Username</span>
+        <input name="username" required placeholder="choose-a-username" />
+      </label>
+      <label>
+        <span>Password</span>
+        <input name="password" type="password" required placeholder="••••••••" />
+      </label>
+      <button type="submit">Create account</button>
+    </form>
+    <p class="muted">Already registered? <a href="{{ url_for('login') }}">Sign in</a>.</p>
+  </div>
+</section>
+{% endblock %}
