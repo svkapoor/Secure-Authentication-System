@@ -10,13 +10,22 @@
 
     <div class="vault-unlock">
       <h2>Unlock your vault</h2>
-      <p class="muted">Enter your vault passphrase. It never leaves this session.</p>
+      {% if vault_unlocked %}
+      
+      {% else %}
+      <p class="muted">Enter your vault passphrase. It never leaves this session. Unlock lasts 5 minutes.</p>
+      {% endif %}
       <form class="stack" method="post">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
         <input type="hidden" name="action" value="unlock" />
+        <p class="muted">
+            Vault is unlocked for the next
+            <span id="vault-unlock-remaining" data-seconds="{{ vault_unlock_remaining }}">{{ vault_unlock_remaining }}</span>
+            seconds.
+          </p>
         <label>
-          <span>Vault passphrase</span>
-          <input name="vault_passphrase" type="password" placeholder="Vault passphrase" required />
+          <span>Vault passphrase{% if vault_unlocked %} (optional while unlocked){% endif %}</span>
+          <input name="vault_passphrase" type="password" placeholder="optional while unlocked"{% if not vault_unlocked %} required{% endif %} />
         </label>
         <button type="submit">Unlock vault</button>
       </form>
@@ -39,10 +48,6 @@
         <label>
           <span>Password</span>
           <input name="vault_password" type="password" placeholder="••••••••" required />
-        </label>
-        <label>
-          <span>Vault passphrase</span>
-          <input name="vault_passphrase" type="password" placeholder="Vault passphrase" required />
         </label>
         <button type="submit">Store password</button>
       </form>
@@ -86,4 +91,26 @@
     {% endif %}
   </div>
 </section>
+{% if vault_unlocked %}
+<script>
+  (function () {
+    var remainingEl = document.getElementById("vault-unlock-remaining");
+    if (!remainingEl) {
+      return;
+    }
+    var remaining = parseInt(remainingEl.getAttribute("data-seconds"), 10);
+    if (!Number.isFinite(remaining) || remaining <= 0) {
+      return;
+    }
+    var tick = function () {
+      remaining = Math.max(0, remaining - 1);
+      remainingEl.textContent = String(remaining);
+      if (remaining > 0) {
+        window.setTimeout(tick, 1000);
+      }
+    };
+    window.setTimeout(tick, 1000);
+  })();
+</script>
+{% endif %}
 {% endblock %}

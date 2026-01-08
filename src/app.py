@@ -38,8 +38,10 @@ COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "0") == "1"
 RATE_WINDOW_SEC = 60
 RATE_MAX_FAILS = 5
 LOCKOUT_SEC = 300
+VAULT_UNLOCK_SEC = 300
 _failed_logins: dict[str, list[float]] = {}
 _lockouts: dict[str, float] = {}
+_vault_unlocks: dict[int, tuple[bytes, float]] = {}
 
 CSRF_COOKIE_NAME = "csrf_token"
 ACCESS_COOKIE_NAME = "access_token"
@@ -167,6 +169,25 @@ def _verify_csrf() -> bool:
     cookie_token = request.cookies.get(CSRF_COOKIE_NAME)
     form_token = request.form.get("csrf_token", "")
     return bool(cookie_token) and cookie_token == form_token
+
+# Vault unlocking has begun for 5 minutes
+def _set_vault_unlock(user_id: int, key: bytes) -> None:
+    _vault_unlocks[user_id] = (key, time.monotonic() + VAULT_UNLOCK_SEC)
+
+# Checks if vault is still unlocked
+def _get_vault_unlock(user_id: int) -> tuple[bytes | None, int]:
+    entry = _vault_unlocks.get(user_id)
+    if not entry:
+        return None, 0
+    key, expires_at = entry
+    now = time.monotonic()
+    if now >= expires_at:
+        _vault_unlocks.pop(user_id, None)
+        return None, 0
+    remaining = int(expires_at - now)
+    return key, remaining
+
+
 
 # Render a page and embed the csrf in form data and cookie
 def _render_with_csrf(template_name: str, **context):
@@ -353,61 +374,90 @@ def protected():
 
     error = None
     vault_entries: list[dict[str, str]] | None = None
+    cached_key, unlock_remaining = _get_vault_unlock(user_id)
+
     if request.method == "POST":
         if not _verify_csrf():
             return "CSRF token missing or invalid", 400
 
         action = request.form.get("action", "unlock")
         passphrase = request.form.get("vault_passphrase", "")
-        if not passphrase:
-            error = "Vault passphrase is required."
-        else:
+        key = None
+
+        if passphrase:
             try:
                 key = _derive_vault_key(passphrase, user_id)
             except ValueError as exc:
                 error = str(exc)
-            else:
-                if action == "add":
-                    label = request.form.get("label", "").strip()
-                    vault_username = request.form.get("vault_username", "").strip()
-                    vault_password = request.form.get("vault_password", "")
-                    if not label or not vault_username or not vault_password:
-                        error = "All fields are required to store a password."
-                    else:
-                        try:
-                            current_entries = _load_vault_entries(user_id, key)
-                        except ValueError:
-                            error = "Incorrect vault passphrase."
-                        else:
-                            entry = {
-                                "label": label,
-                                "login_name": vault_username,
-                                "password": vault_password,
-                                "created_at": datetime.utcnow().isoformat(),
-                            }
-                            updated_entries = [entry] + current_entries
-                            try:
-                                _save_vault_entries(user_id, updated_entries, key)
-                            except Exception:
-                                error = "Unable to encrypt vault. Please try again."
-                            else:
-                                vault_entries = updated_entries
+        elif cached_key:
+            key = cached_key
+        else:
+            error = "Vault passphrase is required."
+
+        if key and not error:
+            if action == "add":
+                label = request.form.get("label", "").strip()
+                vault_username = request.form.get("vault_username", "").strip()
+                vault_password = request.form.get("vault_password", "")
+                if not label or not vault_username or not vault_password:
+                    error = "All fields are required to store a password."
                 else:
                     try:
-                        vault_entries = _load_vault_entries(user_id, key)
+                        current_entries = _load_vault_entries(user_id, key)
                     except ValueError:
-                        error = "Incorrect vault passphrase or vault data is corrupted."
+                        error = "Incorrect vault passphrase."
+                    else:
+                        entry = {
+                            "label": label,
+                            "login_name": vault_username,
+                            "password": vault_password,
+                            "created_at": datetime.utcnow().isoformat(),
+                        }
+                        updated_entries = [entry] + current_entries
+                        try:
+                            _save_vault_entries(user_id, updated_entries, key)
+                        except Exception:
+                            error = "Unable to encrypt vault. Please try again."
+                        else:
+                            vault_entries = updated_entries
+                            if passphrase:
+                                _set_vault_unlock(user_id, key)
+                                cached_key = key
+                                unlock_remaining = VAULT_UNLOCK_SEC
+            else:
+                try:
+                    vault_entries = _load_vault_entries(user_id, key)
+                except ValueError:
+                    error = "Incorrect vault passphrase or vault data is corrupted."
+                else:
+                    if passphrase:
+                        _set_vault_unlock(user_id, key)
+                        cached_key = key
+                        unlock_remaining = VAULT_UNLOCK_SEC
+    elif cached_key:
+        try:
+            vault_entries = _load_vault_entries(user_id, cached_key)
+        except ValueError:
+            error = "Unable to decrypt vault with the cached unlock."
+            _vault_unlocks.pop(user_id, None)
+            cached_key = None
+            unlock_remaining = 0
 
     return _render_with_csrf(
         "vault.html",
         username=username,
         vault_entries=vault_entries,
         error=error,
+        vault_unlocked=bool(cached_key),
+        vault_unlock_remaining=unlock_remaining,
     )
 
 # Logout
 @app.route("/logout")
 def logout():
+    user_id, _ = get_current_user()
+    if user_id:
+        _vault_unlocks.pop(user_id, None)
     response = redirect(url_for("login"))
     response.delete_cookie(ACCESS_COOKIE_NAME)
     response.delete_cookie(REFRESH_COOKIE_NAME)
