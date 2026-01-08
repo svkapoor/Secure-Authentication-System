@@ -99,7 +99,7 @@ def create_refresh_token(user_id: int, username: str) -> str:
     }
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
 
-
+# Gets the salt made for creating the vault key from the user's password
 def _get_vault_salt(user_id: int) -> bytes:
     with sqlite3.connect(DB_PATH) as conn:
         row = conn.execute(
@@ -118,7 +118,7 @@ def _get_vault_salt(user_id: int) -> bytes:
         )
         return salt
 
-
+# Uses the master password and salt to create a vault key
 def _derive_vault_key(passphrase: str, user_id: int) -> bytes:
     if not passphrase:
         raise ValueError("Vault passphrase required.")
@@ -133,19 +133,19 @@ def _derive_vault_key(passphrase: str, user_id: int) -> bytes:
         type=Argon2Type.ID,
     )
 
-
+# Encrypts saved passwords
 def encrypt_secret(plaintext: str, key: bytes) -> tuple[bytes, bytes]:
     aes = AESGCM(key)
     nonce = os.urandom(12)
     ciphertext = aes.encrypt(nonce, plaintext.encode("utf-8"), None)
     return nonce, ciphertext
 
-
+# Descrypts saved passwords
 def decrypt_secret(nonce: bytes, ciphertext: bytes, key: bytes) -> str:
     aes = AESGCM(key)
     return aes.decrypt(nonce, ciphertext, None).decode("utf-8")
 
-
+# Get CSRF cookie and if it doesn't exist set it then get it
 def _get_or_set_csrf_cookie(response=None) -> str:
     token = request.cookies.get(CSRF_COOKIE_NAME)
     if token:
@@ -162,13 +162,13 @@ def _get_or_set_csrf_cookie(response=None) -> str:
         )
     return token
 
-
+# Verify CSRF cookie
 def _verify_csrf() -> bool:
     cookie_token = request.cookies.get(CSRF_COOKIE_NAME)
     form_token = request.form.get("csrf_token", "")
     return bool(cookie_token) and cookie_token == form_token
 
-
+# Render a page and embed the csrf in form data and cookie
 def _render_with_csrf(template_name: str, **context):
     response = make_response(
         render_template(template_name, csrf_token=_get_or_set_csrf_cookie(), **context)
@@ -176,7 +176,7 @@ def _render_with_csrf(template_name: str, **context):
     _get_or_set_csrf_cookie(response)
     return response
 
-
+# Get the current user from the access token
 def get_current_user() -> tuple[int | None, str | None]:
     token = request.cookies.get(ACCESS_COOKIE_NAME)
     if not token:
@@ -186,8 +186,46 @@ def get_current_user() -> tuple[int | None, str | None]:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
     except InvalidTokenError:
         return None, None
-
     return payload.get("uid"), payload.get("sub")
+
+# Loads the encypted vault passwords, decrypts them, returns them
+def _load_vault_entries(user_id: int, key: bytes) -> list[dict[str, str]]:
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT vault_ciphertext, nonce FROM vault_items WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+
+    if not row:
+        return []
+
+    try:
+        plaintext = decrypt_secret(row[1], row[0], key)
+        data = json.loads(plaintext)
+    except Exception as exc:
+        raise ValueError("Unable to decrypt vault with provided passphrase.") from exc
+
+    if isinstance(data, list):
+        return data
+    return []
+
+# Gets the passwords, encrypts them, saves them
+def _save_vault_entries(user_id: int, entries: list[dict[str, str]], key: bytes) -> None:
+    payload = json.dumps(entries)
+    nonce, ciphertext = encrypt_secret(payload, key)
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            INSERT INTO vault_items (user_id, vault_ciphertext, nonce, updated_at)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(user_id) DO UPDATE SET
+                vault_ciphertext=excluded.vault_ciphertext,
+                nonce=excluded.nonce,
+                updated_at=CURRENT_TIMESTAMP
+            """,
+            (user_id, ciphertext, nonce),
+        )
+
 
 # Checks if user is logged in or else displays login page
 @app.route("/")
@@ -305,45 +343,7 @@ def login():
 
     return _render_with_csrf("login.html", error=error)
 
-
-def _load_vault_entries(user_id: int, key: bytes) -> list[dict[str, str]]:
-    with sqlite3.connect(DB_PATH) as conn:
-        row = conn.execute(
-            "SELECT vault_ciphertext, nonce FROM vault_items WHERE user_id = ?",
-            (user_id,),
-        ).fetchone()
-
-    if not row:
-        return []
-
-    try:
-        plaintext = decrypt_secret(row[1], row[0], key)
-        data = json.loads(plaintext)
-    except Exception as exc:
-        raise ValueError("Unable to decrypt vault with provided passphrase.") from exc
-
-    if isinstance(data, list):
-        return data
-    return []
-
-
-def _save_vault_entries(user_id: int, entries: list[dict[str, str]], key: bytes) -> None:
-    payload = json.dumps(entries)
-    nonce, ciphertext = encrypt_secret(payload, key)
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute(
-            """
-            INSERT INTO vault_items (user_id, vault_ciphertext, nonce, updated_at)
-            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-            ON CONFLICT(user_id) DO UPDATE SET
-                vault_ciphertext=excluded.vault_ciphertext,
-                nonce=excluded.nonce,
-                updated_at=CURRENT_TIMESTAMP
-            """,
-            (user_id, ciphertext, nonce),
-        )
-
-
+# Logged in page
 @app.route("/protected", methods=["GET", "POST"])
 def protected():
     # Verify token
@@ -405,7 +405,7 @@ def protected():
         error=error,
     )
 
-
+# Logout
 @app.route("/logout")
 def logout():
     response = redirect(url_for("login"))
@@ -413,7 +413,7 @@ def logout():
     response.delete_cookie(REFRESH_COOKIE_NAME)
     return response
 
-
+# Refresh Page
 @app.route("/refresh", methods=["POST"])
 def refresh():
     if not _verify_csrf():
