@@ -23,10 +23,14 @@ app = Flask(
     template_folder=str(APP_DIR / "templates"),
     static_folder=str(APP_DIR / "static"),
 )
-app.secret_key = os.environ.get("FLASK_SECRET", "dev-secret")
+if "FLASK_SECRET" not in os.environ:
+    raise RuntimeError("FLASK_SECRET must be set.")
+app.secret_key = os.environ["FLASK_SECRET"]
 ph = PasswordHasher()
 
-JWT_SECRET = os.environ.get("JWT_SECRET", app.secret_key)
+if "JWT_SECRET" not in os.environ:
+    raise RuntimeError("JWT_SECRET must be set.")
+JWT_SECRET = os.environ["JWT_SECRET"]
 JWT_ALG = "HS256"
 JWT_EXP_MINUTES = 30
 REFRESH_EXP_DAYS = 7
