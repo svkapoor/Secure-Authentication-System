@@ -1,56 +1,77 @@
 {% extends "base.html" %}
-{% block title %}Vault · Password Manager{% endblock %}
+{% block title %}Vault A· Password Manager{% endblock %}
 {% block content %}
 <section class="card vault-card">
   <div class="card-body">
     <p class="eyebrow">Encrypted vault</p>
     <h1>Welcome back, {{ username }}!</h1>
     <p class="muted">Store credentials securely with AES-256-GCM encryption. Only you can decrypt them after signing in.</p>
-    {% if error %}<p class="error">{{ error }}</p>{% endif %}
 
-    <div class="vault-unlock">
-      <h2>Unlock your vault</h2>
-      {% if vault_unlocked %}
-      
-      {% else %}
-      <p class="muted">Enter your vault passphrase. It never leaves this session. Unlock lasts 5 minutes.</p>
-      {% endif %}
-      <form class="stack" method="post">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-        <input type="hidden" name="action" value="unlock" />
-        <p class="muted">
-            Vault is unlocked for the next
-            <span id="vault-unlock-remaining" data-seconds="{{ vault_unlock_remaining }}">{{ vault_unlock_remaining }}</span>
-            seconds.
-          </p>
-        <label>
-          <span>Vault passphrase{% if vault_unlocked %} (optional while unlocked){% endif %}</span>
-          <input name="vault_passphrase" type="password" placeholder="optional while unlocked"{% if not vault_unlocked %} required{% endif %} />
-        </label>
-        <button type="submit">Unlock vault</button>
-      </form>
-    </div>
+    <div id="vault-app" data-salt="{{ vault_salt }}" data-csrf="{{ csrf_token }}">
+      <div class="vault-unlock">
+        <h2>Unlock your vault</h2>
+        <p class="muted" id="vault-unlock-hint">Enter your vault passphrase (separate from login). Unlock lasts 5 minutes.</p>
+        <div class="stack">
+          <label>
+            <span>Vault passphrase</span>
+            <input id="vault-passphrase" type="password" placeholder="Vault passphrase" autocomplete="new-password" required />
+          </label>
+          <label id="vault-login-password-row" hidden>
+            <span>Login password</span>
+            <input id="vault-login-password" type="password" placeholder="Login password" autocomplete="current-password" />
+          </label>
+          <label id="vault-passphrase-confirm-row" hidden>
+            <span>Confirm vault passphrase</span>
+            <input id="vault-passphrase-confirm" type="password" placeholder="Confirm passphrase" autocomplete="new-password" />
+          </label>
+          <button type="button" id="vault-unlock-button">Unlock vault</button>
+        </div>
+        <p class="muted" id="vault-unlock-timer" hidden>
+          Vault is unlocked for the next <span id="vault-unlock-remaining">0</span> seconds.
+        </p>
+      </div>
 
-    {% if vault_entries is not none %}
-    <div class="vault-form">
-      <h2>Add a new credential</h2>
-      <form class="stack" method="post">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-        <input type="hidden" name="action" value="add" />
-        <label>
-          <span>Label</span>
-          <input name="label" placeholder="Example: Personal Email" required />
-        </label>
-        <label>
-          <span>Username / Email</span>
-          <input name="vault_username" placeholder="me@example.com" required />
-        </label>
-        <label>
-          <span>Password</span>
-          <input name="vault_password" type="password" placeholder="••••••••" required />
-        </label>
-        <button type="submit">Store password</button>
-      </form>
+      <p class="error" id="vault-error" hidden></p>
+
+      <div id="vault-locked-state">
+        <p class="muted">Your vault is locked. Unlock it with your passphrase to view or add entries.</p>
+      </div>
+
+      <div id="vault-content" hidden>
+        <div class="vault-form">
+          <h2>Add a new credential</h2>
+          <div class="stack">
+            <label>
+              <span>Label</span>
+              <input id="vault-label" placeholder="Example: Personal Email" />
+            </label>
+            <label>
+              <span>Username / Email</span>
+              <input id="vault-username" placeholder="me@example.com" />
+            </label>
+            <label>
+              <span>Password</span>
+              <input id="vault-password" type="password" placeholder="Example: 3hQx!2vL" />
+            </label>
+            <button type="button" id="vault-add-button">Store password</button>
+          </div>
+        </div>
+
+        <div class="vault-table-wrapper">
+          <table class="vault-table" id="vault-table" hidden>
+            <thead>
+              <tr>
+                <th>Label</th>
+                <th>Username</th>
+                <th>Password</th>
+                <th>Stored</th>
+              </tr>
+            </thead>
+            <tbody id="vault-table-body"></tbody>
+          </table>
+          <p class="muted" id="vault-empty">No passwords saved yet. Use the form above to add your first credential.</p>
+        </div>
+      </div>
     </div>
 
     <div class="vault-table-wrapper">
@@ -61,56 +82,8 @@
         </form>
         <a class="ghost" href="{{ url_for('logout') }}">Logout</a>
       </div>
-      {% if vault_entries %}
-      <table class="vault-table">
-        <thead>
-          <tr>
-            <th>Label</th>
-            <th>Username</th>
-            <th>Password</th>
-            <th>Stored</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for entry in vault_entries %}
-          <tr>
-            <td>{{ entry.label }}</td>
-            <td>{{ entry.login_name }}</td>
-            <td><code>{{ entry.password }}</code></td>
-            <td>{{ entry.created_at }}</td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-      {% else %}
-      <p class="muted">No passwords saved yet. Use the form above to add your first credential.</p>
-      {% endif %}
     </div>
-    {% else %}
-    <p class="muted">Your vault is locked. Unlock it with your passphrase to view or add entries.</p>
-    {% endif %}
   </div>
 </section>
-{% if vault_unlocked %}
-<script>
-  (function () {
-    var remainingEl = document.getElementById("vault-unlock-remaining");
-    if (!remainingEl) {
-      return;
-    }
-    var remaining = parseInt(remainingEl.getAttribute("data-seconds"), 10);
-    if (!Number.isFinite(remaining) || remaining <= 0) {
-      return;
-    }
-    var tick = function () {
-      remaining = Math.max(0, remaining - 1);
-      remainingEl.textContent = String(remaining);
-      if (remaining > 0) {
-        window.setTimeout(tick, 1000);
-      }
-    };
-    window.setTimeout(tick, 1000);
-  })();
-</script>
-{% endif %}
+<script src="{{ url_for('static', filename='js/vault.js') }}"></script>
 {% endblock %}
