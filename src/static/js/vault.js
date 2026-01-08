@@ -1,3 +1,4 @@
+// Client-side vault encryption/decryption using Web Crypto (PBKDF2 + AES-GCM).
 (function () {
   var app = document.getElementById("vault-app");
   if (!app) {
@@ -35,6 +36,7 @@
   var vaultInitialized = false;
   var initialPayload = null;
 
+  // Surface errors inline without breaking the page flow.
   function setError(message) {
     if (!message) {
       errorEl.hidden = true;
@@ -45,12 +47,14 @@
     errorEl.hidden = false;
   }
 
+  // Toggle locked/unlocked UI.
   function setLockedState(locked) {
     lockedStateEl.hidden = !locked;
     contentEl.hidden = locked;
     timerEl.hidden = locked;
   }
 
+  // Keep the unlock timer live and re-lock when expired.
   function updateCountdown() {
     if (!unlockExpiresAt) {
       return;
@@ -63,6 +67,7 @@
     remainingEl.textContent = String(Math.ceil(remainingMs / 1000));
   }
 
+  // Start or restart the countdown timer.
   function startCountdown() {
     updateCountdown();
     if (countdownTimer) {
@@ -71,6 +76,7 @@
     countdownTimer = window.setInterval(updateCountdown, 1000);
   }
 
+  // Clear sensitive state from memory and reset the UI.
   function lockVault() {
     cachedKey = null;
     entries = [];
@@ -84,6 +90,7 @@
     setError("");
   }
 
+  // Base64 helpers for storing ArrayBuffer data as strings.
   function bytesToBase64(bytes) {
     var binary = "";
     var chunkSize = 0x8000;
@@ -103,6 +110,7 @@
     return bytes;
   }
 
+  // Derive an AES-GCM key from the vault passphrase and per-user salt.
   async function deriveKey(passphrase) {
     var saltBytes = base64ToBytes(saltB64);
     var baseKey = await crypto.subtle.importKey(
@@ -126,6 +134,7 @@
     );
   }
 
+  // Decrypt the vault payload into a list of entries.
   async function decryptEntries(payload, key) {
     if (!payload || !payload.ciphertext || !payload.nonce) {
       return [];
@@ -142,6 +151,7 @@
     return Array.isArray(data) ? data : [];
   }
 
+  // Encrypt the vault entries before sending to the server.
   async function encryptEntries(items, key) {
     var payload = textEncoder.encode(JSON.stringify(items));
     var nonce = crypto.getRandomValues(new Uint8Array(12));
@@ -156,6 +166,7 @@
     };
   }
 
+  // Fetch the encrypted vault blob from the server.
   async function fetchVault() {
     var response = await fetch("/api/vault", { credentials: "same-origin" });
     if (!response.ok) {
@@ -164,6 +175,7 @@
     return response.json();
   }
 
+  // Show passphrase setup fields only when no vault exists yet.
   function updatePassphraseUi() {
     if (loginPasswordRow) {
       loginPasswordRow.hidden = vaultInitialized;
@@ -179,6 +191,7 @@
     }
   }
 
+  // Determine if a vault exists so we can prompt for setup vs unlock.
   async function detectVaultState() {
     try {
       initialPayload = await fetchVault();
@@ -189,6 +202,7 @@
     }
   }
 
+  // Persist encrypted vault data to the server.
   async function saveVault(items) {
     var payload = await encryptEntries(items, cachedKey);
     var response = await fetch("/api/vault", {
@@ -205,6 +219,7 @@
     }
   }
 
+  // Render decrypted entries into the table.
   function renderEntries() {
     tableBodyEl.textContent = "";
     if (!entries.length) {
@@ -236,6 +251,7 @@
     emptyEl.hidden = true;
   }
 
+  // Unlock the vault using the passphrase and load entries.
   async function unlockVault() {
     setError("");
     if (!window.crypto || !window.crypto.subtle) {
@@ -284,6 +300,7 @@
     }
   }
 
+  // Add a new entry, re-encrypt, and save the vault.
   async function addEntry() {
     setError("");
     if (!cachedKey) {
