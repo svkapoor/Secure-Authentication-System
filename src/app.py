@@ -77,6 +77,16 @@ def init_db() -> None:
             );
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS refresh_tokens (
+                user_id INTEGER PRIMARY KEY,
+                token_hash TEXT NOT NULL,
+                expires_at TIMESTAMP NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+            """
+        )
 @app.before_request
 def _ensure_db() -> None:
     init_db()
@@ -101,7 +111,54 @@ def create_refresh_token(user_id: int, username: str) -> str:
     }
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
 
-# Gets the salt made for creating the vault key from the user's password
+# Refresh token helpers
+def _hash_refresh_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _store_refresh_token(user_id: int, token: str) -> None:
+    token_hash = _hash_refresh_token(token)
+    expires_at = (datetime.utcnow() + timedelta(days=REFRESH_EXP_DAYS)).isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            INSERT INTO refresh_tokens (user_id, token_hash, expires_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                token_hash=excluded.token_hash,
+                expires_at=excluded.expires_at
+            """,
+            (user_id, token_hash, expires_at),
+        )
+
+
+def _verify_refresh_token(user_id: int, token: str) -> bool:
+    token_hash = _hash_refresh_token(token)
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT token_hash, expires_at FROM refresh_tokens WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+    if not row:
+        return False
+    stored_hash, expires_at = row
+    if stored_hash != token_hash:
+        return False
+    try:
+        if datetime.utcnow() >= datetime.fromisoformat(expires_at):
+            _clear_refresh_token(user_id)
+            return False
+    except ValueError:
+        _clear_refresh_token(user_id)
+        return False
+    return True
+
+
+def _clear_refresh_token(user_id: int) -> None:
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("DELETE FROM refresh_tokens WHERE user_id = ?", (user_id,))
+
+
 def _get_vault_salt(user_id: int) -> bytes:
     with sqlite3.connect(DB_PATH) as conn:
         row = conn.execute(
@@ -345,6 +402,7 @@ def login():
                 # Create JWT
                 token = create_token(row[0], username)
                 refresh_token = create_refresh_token(row[0], username)
+                _store_refresh_token(row[0], refresh_token)
                 response = redirect(url_for("protected"))
                 response.set_cookie(
                     ACCESS_COOKIE_NAME,
@@ -458,12 +516,13 @@ def logout():
     user_id, _ = get_current_user()
     if user_id:
         _vault_unlocks.pop(user_id, None)
+        _clear_refresh_token(user_id)
     response = redirect(url_for("login"))
     response.delete_cookie(ACCESS_COOKIE_NAME)
     response.delete_cookie(REFRESH_COOKIE_NAME)
     return response
 
-# Refresh Page
+# Refresh Token
 @app.route("/refresh", methods=["POST"])
 def refresh():
     if not _verify_csrf():
@@ -486,11 +545,24 @@ def refresh():
     if not user_id or not username:
         return "Invalid refresh token", 401
 
+    if not _verify_refresh_token(user_id, token):
+        _clear_refresh_token(user_id)
+        return "Invalid refresh token", 401
+
     new_access = create_token(user_id, username)
+    new_refresh = create_refresh_token(user_id, username)
+    _store_refresh_token(user_id, new_refresh)
     response = redirect(url_for("protected"))
     response.set_cookie(
         ACCESS_COOKIE_NAME,
         new_access,
+        httponly=True,
+        samesite="Lax",
+        secure=COOKIE_SECURE,
+    )
+    response.set_cookie(
+        REFRESH_COOKIE_NAME,
+        new_refresh,
         httponly=True,
         samesite="Lax",
         secure=COOKIE_SECURE,
