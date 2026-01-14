@@ -383,6 +383,37 @@ def login():
 
     return _render_with_csrf("login.html", error=error)
 
+# Verifying the users password when setting vault password
+@app.route("/api/verify-login", methods=["POST"])
+def api_verify_login():
+    if not _verify_csrf_header():
+        return jsonify({"error": "CSRF token missing or invalid"}), 400
+
+    user_id, _ = get_current_user()
+    if not user_id:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    data = request.get_json(silent=True) or {}
+    password = data.get("password", "")
+    if not isinstance(password, str) or not password:
+        return jsonify({"error": "Password is required"}), 400
+
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT password FROM users WHERE id = ?",
+            (user_id,),
+        ).fetchone()
+
+    if not row:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    try:
+        ph.verify(row[0], password)
+    except VerifyMismatchError:
+        return jsonify({"ok": False}), 401
+
+    return jsonify({"ok": True}), 200
+
 # Logged in page
 @app.route("/protected", methods=["GET"])
 def protected():

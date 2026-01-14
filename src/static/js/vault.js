@@ -174,6 +174,28 @@
     }
     return response.json();
   }
+  // Calling API to verify user's password
+  async function verifyLoginPassword(password) {
+    var response = await fetch("/api/verify-login", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: {
+        "Content-Type": "application/json",
+        "X-CSRF-Token": csrfToken,
+      },
+      body: JSON.stringify({ password: password }),
+    });
+    if (response.status === 401) {
+      throw new Error("Incorrect login password.");
+    }
+    if (!response.ok) {
+      throw new Error("Unable to verify login password.");
+    }
+    var payload = await response.json();
+    if (!payload.ok) {
+      throw new Error("Incorrect login password.");
+    }
+  }
 
   // Show passphrase setup fields only when no vault exists yet.
   function updatePassphraseUi() {
@@ -279,6 +301,12 @@
         }
         if (!passphraseConfirmInput || passphraseConfirmInput.value !== passphrase) {
           setError("Confirm your vault passphrase to set it.");
+          return;
+        }
+        try {
+          await verifyLoginPassword(loginPassword);
+        } catch (verifyErr) {
+          setError(verifyErr.message || "Unable to verify login password.");
           return;
         }
         cachedKey = key;

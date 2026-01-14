@@ -165,6 +165,10 @@ button:hover {
   gap: 1rem;
 }
 
+#vault-unlock-hint {
+  margin-bottom: 1rem;
+}
+
 .vault-card {
   width: 100%;
 }
