@@ -77,11 +77,16 @@ def init_db() -> None:
             );
             """
         )
+        refresh_info = conn.execute("PRAGMA table_info(refresh_tokens)").fetchall()
+        needs_refresh_reset = any(col[1] == "user_id" and col[5] == 1 for col in refresh_info)
+        if needs_refresh_reset:
+            conn.execute("DROP TABLE IF EXISTS refresh_tokens")
+            refresh_info = []
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS refresh_tokens (
-                user_id INTEGER PRIMARY KEY,
-                token_hash TEXT NOT NULL,
+                token_hash TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL,
                 expires_at TIMESTAMP NOT NULL,
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
             );
@@ -90,6 +95,20 @@ def init_db() -> None:
 @app.before_request
 def _ensure_db() -> None:
     init_db()
+
+
+@app.before_request
+def _handle_options_request():
+    if request.method == "OPTIONS":
+        return make_response("", 204)
+
+
+@app.after_request
+def _add_cors_headers(response):
+    response.headers["Access-Control-Allow-Origin"] = os.environ.get("CORS_ALLOW_ORIGIN", "*")
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-CSRF-Token"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    return response
 
 
 # Creates JWT for authenticated users
@@ -111,6 +130,13 @@ def create_refresh_token(user_id: int, username: str) -> str:
     }
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
 
+
+def _issue_tokens(user_id: int, username: str) -> tuple[str, str]:
+    access = create_token(user_id, username)
+    refresh = create_refresh_token(user_id, username)
+    _store_refresh_token(user_id, refresh)
+    return access, refresh
+
 # Refresh token helpers
 def _hash_refresh_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
@@ -122,13 +148,10 @@ def _store_refresh_token(user_id: int, token: str) -> None:
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
             """
-            INSERT INTO refresh_tokens (user_id, token_hash, expires_at)
+            INSERT OR REPLACE INTO refresh_tokens (token_hash, user_id, expires_at)
             VALUES (?, ?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET
-                token_hash=excluded.token_hash,
-                expires_at=excluded.expires_at
             """,
-            (user_id, token_hash, expires_at),
+            (token_hash, user_id, expires_at),
         )
 
 
@@ -136,25 +159,32 @@ def _verify_refresh_token(user_id: int, token: str) -> bool:
     token_hash = _hash_refresh_token(token)
     with sqlite3.connect(DB_PATH) as conn:
         row = conn.execute(
-            "SELECT token_hash, expires_at FROM refresh_tokens WHERE user_id = ?",
-            (user_id,),
+            "SELECT user_id, expires_at FROM refresh_tokens WHERE token_hash = ?",
+            (token_hash,),
         ).fetchone()
     if not row:
         return False
-    stored_hash, expires_at = row
-    if stored_hash != token_hash:
+    stored_user_id, expires_at = row
+    if stored_user_id != user_id:
+        _revoke_refresh_token(token)
         return False
     try:
         if datetime.utcnow() >= datetime.fromisoformat(expires_at):
-            _clear_refresh_token(user_id)
+            _revoke_refresh_token(token)
             return False
     except ValueError:
-        _clear_refresh_token(user_id)
+        _revoke_refresh_token(token)
         return False
     return True
 
 
-def _clear_refresh_token(user_id: int) -> None:
+def _revoke_refresh_token(token: str) -> None:
+    token_hash = _hash_refresh_token(token)
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("DELETE FROM refresh_tokens WHERE token_hash = ?", (token_hash,))
+
+
+def _clear_refresh_tokens_for_user(user_id: int) -> None:
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("DELETE FROM refresh_tokens WHERE user_id = ?", (user_id,))
 
@@ -184,6 +214,25 @@ def _normalize_blob_value(value: bytes | str | None) -> str | None:
     if isinstance(value, bytes):
         return value.decode("utf-8")
     return value
+
+
+def _uses_bearer_auth() -> bool:
+    auth_header = request.headers.get("Authorization", "")
+    return auth_header.startswith("Bearer ")
+
+
+def _get_authenticated_user() -> tuple[int | None, str | None]:
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        token = auth_header.split(" ", 1)[1].strip()
+        if not token:
+            return None, None
+        try:
+            payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
+        except InvalidTokenError:
+            return None, None
+        return payload.get("uid"), payload.get("sub")
+    return get_current_user()
 
 # Get CSRF cookie and if it doesn't exist set it then get it
 def _get_or_set_csrf_cookie(response=None) -> str:
@@ -383,13 +432,128 @@ def login():
 
     return _render_with_csrf("login.html", error=error)
 
+@app.route("/api/auth/register", methods=["POST"])
+def api_auth_register():
+    data = request.get_json(silent=True) or {}
+    username = data.get("username", "").strip()
+    password = data.get("password", "")
+    if not username or not password:
+        return jsonify({"error": "Username and password are required."}), 400
+    password_hash = ph.hash(password)
+    with sqlite3.connect(DB_PATH) as conn:
+        try:
+            cursor = conn.execute(
+                "INSERT INTO users (username, password) VALUES (?, ?)",
+                (username, password_hash),
+            )
+        except sqlite3.IntegrityError:
+            return jsonify({"error": "Username already exists."}), 409
+        user_id = cursor.lastrowid
+
+    access, refresh = _issue_tokens(user_id, username)
+    salt_b64 = base64.b64encode(_get_vault_salt(user_id)).decode("utf-8")
+    return (
+        jsonify(
+            {
+                "access_token": access,
+                "refresh_token": refresh,
+                "vault_salt": salt_b64,
+                "username": username,
+            }
+        ),
+        201,
+    )
+
+
+@app.route("/api/auth/login", methods=["POST"])
+def api_auth_login():
+    data = request.get_json(silent=True) or {}
+    username = data.get("username", "").strip()
+    password = data.get("password", "")
+    if not username or not password:
+        return jsonify({"error": "Username and password are required."}), 400
+
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT id, password FROM users WHERE username = ?",
+            (username,),
+        ).fetchone()
+
+    if not row:
+        return jsonify({"error": "Invalid credentials."}), 401
+
+    try:
+        ph.verify(row[1], password)
+    except VerifyMismatchError:
+        return jsonify({"error": "Invalid credentials."}), 401
+
+    access, refresh = _issue_tokens(row[0], username)
+    salt_b64 = base64.b64encode(_get_vault_salt(row[0])).decode("utf-8")
+    return jsonify(
+        {
+            "access_token": access,
+            "refresh_token": refresh,
+            "vault_salt": salt_b64,
+            "username": username,
+        }
+    )
+
+
+@app.route("/api/auth/refresh", methods=["POST"])
+def api_auth_refresh():
+    data = request.get_json(silent=True) or {}
+    refresh_token = data.get("refresh_token", "")
+    if not refresh_token:
+        return jsonify({"error": "Refresh token is required."}), 400
+
+    try:
+        payload = jwt.decode(refresh_token, JWT_SECRET, algorithms=[JWT_ALG])
+    except InvalidTokenError:
+        return jsonify({"error": "Invalid refresh token."}), 401
+
+    if payload.get("typ") != "refresh":
+        return jsonify({"error": "Invalid refresh token."}), 401
+
+    user_id = payload.get("uid")
+    username = payload.get("sub")
+    if not user_id or not username:
+        return jsonify({"error": "Invalid refresh token."}), 401
+
+    if not _verify_refresh_token(user_id, refresh_token):
+        _revoke_refresh_token(refresh_token)
+        return jsonify({"error": "Invalid refresh token."}), 401
+
+    access, new_refresh = _issue_tokens(user_id, username)
+    return jsonify({"access_token": access, "refresh_token": new_refresh})
+
+
+@app.route("/api/auth/logout", methods=["POST"])
+def api_auth_logout():
+    data = request.get_json(silent=True) or {}
+    refresh_token = data.get("refresh_token", "")
+    if not refresh_token:
+        return jsonify({"error": "Refresh token is required."}), 400
+
+    try:
+        payload = jwt.decode(refresh_token, JWT_SECRET, algorithms=[JWT_ALG])
+    except InvalidTokenError:
+        return jsonify({"error": "Invalid refresh token."}), 401
+
+    user_id_from_token = payload.get("uid")
+    if not user_id_from_token:
+        return jsonify({"error": "Invalid refresh token."}), 401
+
+    _revoke_refresh_token(refresh_token)
+    return jsonify({"ok": True})
+
+
 # Verifying the users password when setting vault password
 @app.route("/api/verify-login", methods=["POST"])
 def api_verify_login():
-    if not _verify_csrf_header():
+    if not _uses_bearer_auth() and not _verify_csrf_header():
         return jsonify({"error": "CSRF token missing or invalid"}), 400
 
-    user_id, _ = get_current_user()
+    user_id, _ = _get_authenticated_user()
     if not user_id:
         return jsonify({"error": "Unauthorized"}), 401
 
@@ -430,20 +594,21 @@ def protected():
 
 @app.route("/api/vault", methods=["GET"])
 def api_vault_get():
-    user_id, _ = get_current_user()
+    user_id, _ = _get_authenticated_user()
     if not user_id:
         return jsonify({"error": "Unauthorized"}), 401
 
     ciphertext, nonce = _get_vault_payload(user_id)
-    return jsonify({"ciphertext": ciphertext, "nonce": nonce}), 200
+    salt_b64 = base64.b64encode(_get_vault_salt(user_id)).decode("utf-8")
+    return jsonify({"ciphertext": ciphertext, "nonce": nonce, "vault_salt": salt_b64}), 200
 
 
 @app.route("/api/vault", methods=["POST"])
 def api_vault_post():
-    if not _verify_csrf_header():
+    if not _uses_bearer_auth() and not _verify_csrf_header():
         return "CSRF token missing or invalid", 400
 
-    user_id, _ = get_current_user()
+    user_id, _ = _get_authenticated_user()
     if not user_id:
         return "Unauthorized", 401
 
@@ -456,12 +621,23 @@ def api_vault_post():
     _save_vault_payload(user_id, ciphertext, nonce)
     return jsonify({"ok": True}), 200
 
+
+@app.route("/api/csrf", methods=["GET"])
+def api_csrf():
+    response = jsonify({"csrf_token": _get_or_set_csrf_cookie()})
+    _get_or_set_csrf_cookie(response)
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
 # Logout
 @app.route("/logout")
 def logout():
     user_id, _ = get_current_user()
-    if user_id:
-        _clear_refresh_token(user_id)
+    token = request.cookies.get(REFRESH_COOKIE_NAME)
+    if token:
+        _revoke_refresh_token(token)
+    elif user_id:
+        _clear_refresh_tokens_for_user(user_id)
     response = redirect(url_for("login"))
     response.delete_cookie(ACCESS_COOKIE_NAME)
     response.delete_cookie(REFRESH_COOKIE_NAME)
@@ -491,12 +667,10 @@ def refresh():
         return "Invalid refresh token", 401
 
     if not _verify_refresh_token(user_id, token):
-        _clear_refresh_token(user_id)
+        _revoke_refresh_token(token)
         return "Invalid refresh token", 401
 
-    new_access = create_token(user_id, username)
-    new_refresh = create_refresh_token(user_id, username)
-    _store_refresh_token(user_id, new_refresh)
+    new_access, new_refresh = _issue_tokens(user_id, username)
     response = redirect(url_for("protected"))
     response.set_cookie(
         ACCESS_COOKIE_NAME,

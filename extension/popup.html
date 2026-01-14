@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Secure Auth Vault</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main id="vault-extension">
+      <section class="config-card">
+        <h1>Secure Auth Vault</h1>
+        <label class="stack">
+          <span>Server URL</span>
+          <input id="server-url" type="url" placeholder="http://127.0.0.1:5000" />
+        </label>
+        <button id="save-server">Save Server</button>
+        <p class="muted">
+          Point to any running instance. All API calls happen via HTTPS/HTTP directly from the extension.
+        </p>
+      </section>
+
+      <section class="auth-card">
+        <h2>Account</h2>
+        <p id="auth-status" class="muted">Not authenticated.</p>
+
+        <div id="login-form">
+          <label class="stack">
+            <span>Username</span>
+            <input id="login-username" autocomplete="off" />
+          </label>
+          <label class="stack">
+            <span>Password</span>
+            <input id="login-password" type="password" autocomplete="off" />
+          </label>
+          <button id="login-button">Login</button>
+        </div>
+
+        <div id="register-form" hidden>
+          <label class="stack">
+            <span>Username</span>
+            <input id="register-username" autocomplete="off" />
+          </label>
+          <label class="stack">
+            <span>Password</span>
+            <input id="register-password" type="password" autocomplete="off" />
+          </label>
+          <button id="register-button">Create Account</button>
+        </div>
+
+        <button id="toggle-auth-mode" class="ghost-button">Need an account? Register</button>
+        <button id="logout-button" hidden>Logout</button>
+      </section>
+
+      <section class="vault-card" id="vault-section" hidden>
+        <p id="status-text" class="muted"></p>
+        <p id="vault-error" class="error" hidden></p>
+
+        <div id="locked-state">
+          <label class="stack">
+            <span>Vault passphrase</span>
+            <input id="vault-passphrase" type="password" autocomplete="off" />
+          </label>
+          <div id="setup-extra">
+            <label class="stack">
+              <span>Confirm passphrase</span>
+              <input id="vault-passphrase-confirm" type="password" autocomplete="off" />
+            </label>
+            <label class="stack">
+              <span>Login password (verify ownership)</span>
+              <input id="vault-login-password" type="password" autocomplete="off" />
+            </label>
+          </div>
+          <button id="vault-unlock-button">Unlock Vault</button>
+        </div>
+
+        <div id="vault-content" hidden>
+          <p class="muted">
+            Vault auto-locks after <span id="timer-remaining">300</span>s. Add new credentials below.
+          </p>
+          <form id="vault-add-form">
+            <label class="stack">
+              <span>Label</span>
+              <input id="vault-label" type="text" autocomplete="off" required />
+            </label>
+            <label class="stack">
+              <span>Username / Email</span>
+              <input id="vault-username" type="text" autocomplete="off" required />
+            </label>
+            <label class="stack">
+              <span>Password</span>
+              <input id="vault-password" type="password" autocomplete="off" required />
+            </label>
+            <button type="submit" id="vault-add-button">Save Password</button>
+          </form>
+
+          <table id="vault-table" hidden>
+            <thead>
+              <tr>
+                <th>Label</th>
+                <th>Username</th>
+                <th>Password</th>
+                <th>Stored</th>
+              </tr>
+            </thead>
+            <tbody id="vault-table-body"></tbody>
+          </table>
+          <p id="vault-empty" class="muted">No stored credentials yet.</p>
+        </div>
+      </section>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>

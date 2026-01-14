@@ -40,6 +40,7 @@ Create a `.env` file or export variables in your shell before running the app.
 | `FLASK_SECRET` | ✅ | 32+ character secret string used for Flask session key derivation, CSRF token signing, and default entropy for salts. |
 | `JWT_SECRET` | ✅ | Secret string used to sign/verify JWT access and refresh tokens. Keep it distinct from `FLASK_SECRET`. |
 | `COOKIE_SECURE` | optional | Set to `1` in production to mark cookies as `Secure` so they are only sent over HTTPS. |
+| `CORS_ALLOW_ORIGIN` | optional | Value for the `Access-Control-Allow-Origin` header on API responses (defaults to `*`). Set to your production origin(s) when deploying the extension. |
 
 Example (macOS/Linux):
 ```bash
@@ -65,6 +66,22 @@ The server listens on `http://127.0.0.1:5000` by default (Flask debug mode is en
 4. **Unlock the vault** on subsequent visits by entering the passphrase. The key lives in memory for five minutes, after which the vault auto-locks and the key is cleared.
 5. **Add credentials**. Each entry stays entirely client-side until it’s encrypted; decrypted secrets never hit the network or the database in plaintext.
 6. **Refresh tokens** silently extend your session via `/refresh`, while `/logout` clears both HTTP-only cookies and the hashed refresh token record.
+
+## Chrome Extension
+The `extension/` folder contains a Chrome toolbar companion that mirrors the vault workflow.
+
+### Load & Configure
+1. Run the Flask server (`python src/app.py`).
+2. Open `chrome://extensions`, enable **Developer mode**, choose **Load unpacked…**, and select the `extension/` directory.
+3. Pin **Secure Auth Vault** from the extensions menu for quick access.
+4. In the popup, set your server URL (defaults to `http://127.0.0.1:5000`). The value is saved via `chrome.storage`, so you can target remote deployments as well.
+
+### Use the Popup
+- Register or log in directly from the extension—the backend exposes JSON endpoints (`/api/auth/register`, `/api/auth/login`, `/api/auth/refresh`, `/api/auth/logout`) that return JWTs and hashed refresh tokens specifically for API clients. No prior browser session is required.
+- First-time vault setup still re-verifies the login password (via `/api/verify-login`) before accepting a passphrase; all encryption remains client-side (PBKDF2 → AES-GCM) inside the popup.
+- Unlocks last five minutes, with a visible countdown; afterwards the extension wipes the key and re-locks automatically.
+- Adding credentials reuses the zero-knowledge workflow: entries encrypt client-side, and the extension POSTs only ciphertext/nonce to `/api/vault`.
+- Update `extension/manifest.json` if you want to restrict `host_permissions` to your production domain instead of using `<all_urls>`.
 
 ## Data Storage
 - `src/app.db` (SQLite) holds:

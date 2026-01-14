@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "Secure Auth Vault",
+  "description": "Unlock and manage your zero-knowledge vault directly from the Chrome toolbar.",
+  "version": "1.0.0",
+  "permissions": ["storage"],
+  "host_permissions": ["<all_urls>"],
+  "action": {
+    "default_title": "Secure Auth Vault",
+    "default_popup": "popup.html"
+  }
+}
