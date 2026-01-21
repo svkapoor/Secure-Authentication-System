@@ -4,19 +4,20 @@ import base64
 import hashlib
 import os
 import secrets
-import sqlite3
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import jwt
-from flask import Flask, jsonify, make_response, redirect, render_template, request, url_for
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
+from flask import Flask, jsonify, make_response, redirect, render_template, request, url_for
 from jwt import InvalidTokenError
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine import Engine
+from sqlalchemy.exc import IntegrityError
 
 APP_DIR = Path(__file__).resolve().parent
-DB_PATH = APP_DIR / "app.db"
 
 app = Flask(
     __name__,
@@ -35,6 +36,16 @@ JWT_ALG = "HS256"
 JWT_EXP_MINUTES = 30
 REFRESH_EXP_DAYS = 7
 COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "0") == "1"
+DATABASE_URL = os.environ.get("DATABASE_URL")
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL must point to your Cloud SQL/Postgres instance.")
+engine: Engine = create_engine(
+    DATABASE_URL,
+    pool_pre_ping=True,
+    pool_size=int(os.environ.get("DB_POOL_SIZE", "5")),
+    max_overflow=int(os.environ.get("DB_MAX_OVERFLOW", "10")),
+    future=True,
+)
 
 # Rate limiting
 RATE_WINDOW_SEC = 60
@@ -49,54 +60,42 @@ REFRESH_COOKIE_NAME = "refresh_token"
 
 # Creates database if doesn't exist
 def init_db() -> None:
-    with sqlite3.connect(DB_PATH) as conn:
+    with engine.begin() as conn:
         conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT UNIQUE NOT NULL,
-                password TEXT NOT NULL,
-                vault_salt BLOB
-            );
-            """
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS users (
+                    id SERIAL PRIMARY KEY,
+                    username TEXT UNIQUE NOT NULL,
+                    password TEXT NOT NULL,
+                    vault_salt BYTEA
+                );
+                """
+            )
         )
-        user_columns = conn.execute("PRAGMA table_info(users)").fetchall()
-        if not any(col[1] == "vault_salt" for col in user_columns):
-            conn.execute("ALTER TABLE users ADD COLUMN vault_salt BLOB")
-        info = conn.execute("PRAGMA table_info(vault_items)").fetchall()
-        if info and not any(col[1] == "vault_ciphertext" for col in info):
-            conn.execute("DROP TABLE vault_items")
         conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS vault_items (
-                user_id INTEGER PRIMARY KEY,
-                vault_ciphertext BLOB NOT NULL,
-                nonce BLOB NOT NULL,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-            );
-            """
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS vault_items (
+                    user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                    vault_ciphertext TEXT,
+                    nonce TEXT,
+                    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+                );
+                """
+            )
         )
-        refresh_info = conn.execute("PRAGMA table_info(refresh_tokens)").fetchall()
-        needs_refresh_reset = any(col[1] == "user_id" and col[5] == 1 for col in refresh_info)
-        if needs_refresh_reset:
-            conn.execute("DROP TABLE IF EXISTS refresh_tokens")
-            refresh_info = []
         conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS refresh_tokens (
-                token_hash TEXT PRIMARY KEY,
-                user_id INTEGER NOT NULL,
-                expires_at TIMESTAMP NOT NULL,
-                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-            );
-            """
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS refresh_tokens (
+                    token_hash TEXT PRIMARY KEY,
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    expires_at TIMESTAMPTZ NOT NULL
+                );
+                """
+            )
         )
-@app.before_request
-def _ensure_db() -> None:
-    init_db()
-
-
 @app.before_request
 def _handle_options_request():
     if request.method == "OPTIONS":
@@ -145,22 +144,27 @@ def _hash_refresh_token(token: str) -> str:
 def _store_refresh_token(user_id: int, token: str) -> None:
     token_hash = _hash_refresh_token(token)
     expires_at = (datetime.utcnow() + timedelta(days=REFRESH_EXP_DAYS)).isoformat()
-    with sqlite3.connect(DB_PATH) as conn:
+    with engine.begin() as conn:
         conn.execute(
-            """
-            INSERT OR REPLACE INTO refresh_tokens (token_hash, user_id, expires_at)
-            VALUES (?, ?, ?)
-            """,
-            (token_hash, user_id, expires_at),
+            text(
+                """
+                INSERT INTO refresh_tokens (token_hash, user_id, expires_at)
+                VALUES (:token_hash, :user_id, :expires_at)
+                ON CONFLICT (token_hash) DO UPDATE SET
+                    user_id = EXCLUDED.user_id,
+                    expires_at = EXCLUDED.expires_at
+                """
+            ),
+            {"token_hash": token_hash, "user_id": user_id, "expires_at": expires_at},
         )
 
 
 def _verify_refresh_token(user_id: int, token: str) -> bool:
     token_hash = _hash_refresh_token(token)
-    with sqlite3.connect(DB_PATH) as conn:
+    with engine.connect() as conn:
         row = conn.execute(
-            "SELECT user_id, expires_at FROM refresh_tokens WHERE token_hash = ?",
-            (token_hash,),
+            text("SELECT user_id, expires_at FROM refresh_tokens WHERE token_hash = :token_hash"),
+            {"token_hash": token_hash},
         ).fetchone()
     if not row:
         return False
@@ -180,20 +184,26 @@ def _verify_refresh_token(user_id: int, token: str) -> bool:
 
 def _revoke_refresh_token(token: str) -> None:
     token_hash = _hash_refresh_token(token)
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute("DELETE FROM refresh_tokens WHERE token_hash = ?", (token_hash,))
+    with engine.begin() as conn:
+        conn.execute(
+            text("DELETE FROM refresh_tokens WHERE token_hash = :token_hash"),
+            {"token_hash": token_hash},
+        )
 
 
 def _clear_refresh_tokens_for_user(user_id: int) -> None:
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute("DELETE FROM refresh_tokens WHERE user_id = ?", (user_id,))
+    with engine.begin() as conn:
+        conn.execute(
+            text("DELETE FROM refresh_tokens WHERE user_id = :user_id"),
+            {"user_id": user_id},
+        )
 
 
 def _get_vault_salt(user_id: int) -> bytes:
-    with sqlite3.connect(DB_PATH) as conn:
+    with engine.begin() as conn:
         row = conn.execute(
-            "SELECT vault_salt FROM users WHERE id = ?",
-            (user_id,),
+            text("SELECT vault_salt FROM users WHERE id = :user_id"),
+            {"user_id": user_id},
         ).fetchone()
         if not row:
             raise ValueError("User not found.")
@@ -202,8 +212,8 @@ def _get_vault_salt(user_id: int) -> bytes:
             return bytes(existing)
         salt = os.urandom(16)
         conn.execute(
-            "UPDATE users SET vault_salt = ? WHERE id = ?",
-            (salt, user_id),
+            text("UPDATE users SET vault_salt = :salt WHERE id = :user_id"),
+            {"salt": salt, "user_id": user_id},
         )
         return salt
 
@@ -286,10 +296,12 @@ def get_current_user() -> tuple[int | None, str | None]:
 
 # Loads the encypted vault passwords, decrypts them, returns them
 def _get_vault_payload(user_id: int) -> tuple[str | None, str | None]:
-    with sqlite3.connect(DB_PATH) as conn:
+    with engine.connect() as conn:
         row = conn.execute(
-            "SELECT vault_ciphertext, nonce FROM vault_items WHERE user_id = ?",
-            (user_id,),
+            text(
+                "SELECT vault_ciphertext, nonce FROM vault_items WHERE user_id = :user_id"
+            ),
+            {"user_id": user_id},
         ).fetchone()
 
     if not row:
@@ -301,17 +313,19 @@ def _get_vault_payload(user_id: int) -> tuple[str | None, str | None]:
 
 # Gets the encrypted vault payload, saves it
 def _save_vault_payload(user_id: int, ciphertext: str, nonce: str) -> None:
-    with sqlite3.connect(DB_PATH) as conn:
+    with engine.begin() as conn:
         conn.execute(
-            """
-            INSERT INTO vault_items (user_id, vault_ciphertext, nonce, updated_at)
-            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-            ON CONFLICT(user_id) DO UPDATE SET
-                vault_ciphertext=excluded.vault_ciphertext,
-                nonce=excluded.nonce,
-                updated_at=CURRENT_TIMESTAMP
-            """,
-            (user_id, ciphertext, nonce),
+            text(
+                """
+                INSERT INTO vault_items (user_id, vault_ciphertext, nonce, updated_at)
+                VALUES (:user_id, :ciphertext, :nonce, CURRENT_TIMESTAMP)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    vault_ciphertext = EXCLUDED.vault_ciphertext,
+                    nonce = EXCLUDED.nonce,
+                    updated_at = CURRENT_TIMESTAMP
+                """
+            ),
+            {"user_id": user_id, "ciphertext": ciphertext, "nonce": nonce},
         )
 
 
@@ -339,16 +353,18 @@ def register():
         
         # Hashes password using Argon2
         password_hash = ph.hash(password)
-        with sqlite3.connect(DB_PATH) as conn:
-            try:
-                cursor = conn.execute(
-                    "INSERT INTO users (username, password) VALUES (?, ?)",
-                    (username, password_hash),
+        try:
+            with engine.begin() as conn:
+                result = conn.execute(
+                    text(
+                        "INSERT INTO users (username, password) VALUES (:username, :password) RETURNING id"
+                    ),
+                    {"username": username, "password": password_hash},
                 )
-            except sqlite3.IntegrityError:
-                error = "That username is already taken."
-                return _render_with_csrf("register.html", error=error), 400
-            user_id = cursor.lastrowid
+                user_id = result.scalar_one()
+        except IntegrityError:
+            error = "That username is already taken."
+            return _render_with_csrf("register.html", error=error), 400
 
         _get_vault_salt(user_id)
 
@@ -376,10 +392,10 @@ def login():
             return _render_with_csrf("login.html", error=error), 429
 
         # Checks if username exists
-        with sqlite3.connect(DB_PATH) as conn:
+        with engine.connect() as conn:
             row = conn.execute(
-                "SELECT id, password FROM users WHERE username = ?",
-                (username,),
+                text("SELECT id, password FROM users WHERE username = :username"),
+                {"username": username},
             ).fetchone()
         # If doesn't exist throw error
         if not row:
@@ -440,15 +456,17 @@ def api_auth_register():
     if not username or not password:
         return jsonify({"error": "Username and password are required."}), 400
     password_hash = ph.hash(password)
-    with sqlite3.connect(DB_PATH) as conn:
-        try:
-            cursor = conn.execute(
-                "INSERT INTO users (username, password) VALUES (?, ?)",
-                (username, password_hash),
+    try:
+        with engine.begin() as conn:
+            result = conn.execute(
+                text(
+                    "INSERT INTO users (username, password) VALUES (:username, :password) RETURNING id"
+                ),
+                {"username": username, "password": password_hash},
             )
-        except sqlite3.IntegrityError:
-            return jsonify({"error": "Username already exists."}), 409
-        user_id = cursor.lastrowid
+            user_id = result.scalar_one()
+    except IntegrityError:
+        return jsonify({"error": "Username already exists."}), 409
 
     access, refresh = _issue_tokens(user_id, username)
     salt_b64 = base64.b64encode(_get_vault_salt(user_id)).decode("utf-8")
@@ -473,10 +491,10 @@ def api_auth_login():
     if not username or not password:
         return jsonify({"error": "Username and password are required."}), 400
 
-    with sqlite3.connect(DB_PATH) as conn:
+    with engine.connect() as conn:
         row = conn.execute(
-            "SELECT id, password FROM users WHERE username = ?",
-            (username,),
+            text("SELECT id, password FROM users WHERE username = :username"),
+            {"username": username},
         ).fetchone()
 
     if not row:
@@ -562,10 +580,10 @@ def api_verify_login():
     if not isinstance(password, str) or not password:
         return jsonify({"error": "Password is required"}), 400
 
-    with sqlite3.connect(DB_PATH) as conn:
+    with engine.connect() as conn:
         row = conn.execute(
-            "SELECT password FROM users WHERE id = ?",
-            (user_id,),
+            text("SELECT password FROM users WHERE id = :user_id"),
+            {"user_id": user_id},
         ).fetchone()
 
     if not row:
@@ -688,6 +706,7 @@ def refresh():
     )
     return response
 
+init_db()
 
 if __name__ == "__main__":
     app.run(debug=True)

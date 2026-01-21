@@ -90,7 +90,7 @@
     setError("");
   }
 
-  // Base64 helpers for storing ArrayBuffer data as strings.
+  // Convert raw bytes into a Base64 string so encrypted blobs can be serialized.
   function bytesToBase64(bytes) {
     var binary = "";
     var chunkSize = 0x8000;
@@ -101,6 +101,7 @@
     return btoa(binary);
   }
 
+  // Convert a Base64 string into a Uint8Array for Web Crypto usage.
   function base64ToBytes(b64) {
     var binary = atob(b64);
     var bytes = new Uint8Array(binary.length);
@@ -174,7 +175,7 @@
     }
     return response.json();
   }
-  // Calling API to verify user's password
+  // Confirm the supplied login password by round-tripping through the server API.
   async function verifyLoginPassword(password) {
     var response = await fetch("/api/verify-login", {
       method: "POST",

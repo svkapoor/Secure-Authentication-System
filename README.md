@@ -39,8 +39,10 @@ Create a `.env` file or export variables in your shell before running the app.
 | --- | --- | --- |
 | `FLASK_SECRET` | ✅ | 32+ character secret string used for Flask session key derivation, CSRF token signing, and default entropy for salts. |
 | `JWT_SECRET` | ✅ | Secret string used to sign/verify JWT access and refresh tokens. Keep it distinct from `FLASK_SECRET`. |
+| `DATABASE_URL` | ✅ | SQLAlchemy connection string for your Google Cloud SQL instance (e.g. `postgresql+psycopg2://user:pass@host:5432/db`). |
 | `COOKIE_SECURE` | optional | Set to `1` in production to mark cookies as `Secure` so they are only sent over HTTPS. |
 | `CORS_ALLOW_ORIGIN` | optional | Value for the `Access-Control-Allow-Origin` header on API responses (defaults to `*`). Set to your production origin(s) when deploying the extension. |
+| `DB_POOL_SIZE` / `DB_MAX_OVERFLOW` | optional | Tune SQLAlchemy connection pool sizes for Cloud SQL (defaults: 5 / 10). |
 
 Example (macOS/Linux):
 ```bash
@@ -84,11 +86,11 @@ The `extension/` folder contains a Chrome toolbar companion that mirrors the vau
 - Update `extension/manifest.json` if you want to restrict `host_permissions` to your production domain instead of using `<all_urls>`.
 
 ## Data Storage
-- `src/app.db` (SQLite) holds:
-  - `users`: username, Argon2 hash, per-user random vault salt.
-  - `vault_items`: single row per user with ciphertext + nonce blobs and timestamps.
+- A Cloud SQL / PostgreSQL database (pointed to by `DATABASE_URL`) contains:
+  - `users`: username, Argon2 hash, per-user random vault salt (`BYTEA` column).
+  - `vault_items`: one row per user with ciphertext + nonce and timestamps.
   - `refresh_tokens`: hashed refresh tokens with expirations for revocation.
-- Delete `src/app.db` to reset the environment (useful for local testing after schema changes).
+- To reset the environment, drop/truncate these tables via psql or your preferred admin console.
 
 ## Security Considerations & Learnings
 - **Zero-knowledge architecture**: all vault encryption happens in the browser; the server lacks the key to decrypt user data, even with database access.
